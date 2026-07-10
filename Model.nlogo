@@ -189,7 +189,7 @@ end
 
 to-report classe-nom [code]
   report item code ["eau" "arbres" "prairie" "veg-inondee" "cultures"
-                    "arbustes" "bati" "sol-nu" "neige"]
+                    "arbustes" "bati" "sol-nu"]
 end
 
 to colorer
