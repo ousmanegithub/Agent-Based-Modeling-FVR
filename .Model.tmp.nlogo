@@ -37,9 +37,7 @@ patches-own [
   contre-saison? canal? seuil est-grande-eau? coeur-eau?
 ]
 
-; ============================================================================
-;  SETUP
-; ============================================================================
+
 to setup
   clear-all
   set occupation-sol gis:load-dataset "Delta_fleuve_senegal_100m_small.asc"
@@ -111,9 +109,7 @@ to calculer-seuils-eaux
   ask patches with [classe-base = "eau" and not est-grande-eau?] [ set seuil 1 - (seuil / maxe) ]
 end
 
-; ============================================================================
-;  GO
-; ============================================================================
+
 to go
   set semaine semaine + 1
   if semaine > 52 [ set semaine 1  set annee annee + 1 ]
@@ -122,17 +118,17 @@ to go
   if semaine = 6  [ nettoyer-contre-saison ]
   appliquer-etat-paysage
 
-  ; --- couche vectorielle (EDO) ---
+  ; couche vectorielle (EDO)
   emergence-vecteurs
   integrer-edo-vecteurs
   deplacer-vecteurs
   mortalite-cohortes
 
-  ; --- couche hote ---
+  ; couche hote
   deplacer-ruminants
   amorcer-epidemie
 
-  ; --- transmission APRES les deplacements ---
+  ; transmission APRES les deplacements
   transmission-vecteur-hote
   evolution-ruminants
   renouvellement-cheptel
@@ -157,9 +153,6 @@ to calculer-intensite
   [ set intensite-cs ifelse-value (semaine <= 6) [(6 - semaine) / 6] [0] ]
 end
 
-; ============================================================================
-;  ENVIRONNEMENT (inchange)
-; ============================================================================
 to appliquer-etat-paysage
   ask patches with [classe-base = "cultures"] [
     let niv ifelse-value contre-saison? [intensite-cs] [intensite]
@@ -243,9 +236,7 @@ to nettoyer-contre-saison
   ]
 end
 
-; ============================================================================
-;  COUCHE VECTORIELLE (EDO)
-; ============================================================================
+
 to emergence-vecteurs
   let facteur-saison (0.3 + intensite)
   if facteur-saison < 0.35 [ stop ]
@@ -282,7 +273,6 @@ to integrer-edo-vecteurs
       let W [surface-eau-locale] of p
       let Lambda taux-recrutement W
 
-      ; l'amplification hote->vecteur est geree dans transmission-vecteur-hote
       let lambda-v 0
 
       let dSv ((1 - q-vertical) * Lambda) - (lambda-v * Sv) - (mu-v * Sv)
@@ -302,11 +292,11 @@ to-report taux-recrutement [W]
   report rho-emergence * W * facteur-saison
 end
 
-; --- Amorçage : garantit une source d'infection tant que l'epidemie n'a pas pris ---
+
 to amorcer-epidemie
-  ; on n'amorce que s'il y a des moustiques (donc apres le debut de l'emergence)
+
   if any? cohortes [
-    ; s'il n'y a plus aucun hote infectieux ni expose, on reintroduit le virus
+
     if (count ruminants with [etat-h = "I" or etat-h = "E"]) = 0 [
       if any? ruminants with [etat-h = "S"] [
         ask n-of (min (list 5 (count ruminants with [etat-h = "S"]))) ruminants with [etat-h = "S"] [
@@ -366,9 +356,6 @@ to-report type-gite
   report "mare-pluie"
 end
 
-; ============================================================================
-;  COUCHE HOTE (ruminants SEIR, disperses)
-; ============================================================================
 to creer-ruminants
   let zones patches with [type-milieu = "prairie" or type-milieu = "arbustes"
                           or type-milieu = "sol-nu"]
@@ -379,7 +366,7 @@ to creer-ruminants
     set gestante? (random-float 1 < 0.4)
     set shape "cow"  set size 8  set color white
   ]
-  ; introduction franche du virus : 10 cas infectieux au depart
+
 end
 
 to deplacer-ruminants
@@ -402,7 +389,6 @@ to deplacer-ruminants
   ]
 end
 
-; --- TRANSMISSION croisee vecteur <-> hote (apres deplacements) ---
 to transmission-vecteur-hote
   set nouveaux-cas 0
 
@@ -461,9 +447,7 @@ to evolution-ruminants
   ]
 end
 
-; --- Renouvellement demographique : naissances / renouvellement du cheptel ---
-; Une fraction des animaux est remplacee par de jeunes sensibles chaque semaine.
-; Cela reconstitue le pool de sensibles et permet a la FVR de persister (endemie).
+
 to renouvellement-cheptel
   let taux-renouvellement 0.02      ; 2% du cheptel renouvele par semaine
   ask ruminants [
