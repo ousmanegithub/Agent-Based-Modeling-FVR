@@ -8,6 +8,7 @@ cohortes-own [
   age-semaines
   gite-origine
   patch-gite         ; gite d'emergence (lecture du forçage)
+  infectee?
 ]
 
 ruminants-own [
@@ -27,9 +28,12 @@ globals [
   pop-moustiques
   ; --- couche hote ---
   nb-ruminants
-  proba-piqure beta-vh beta-hv
-  nu-h gamma-h delta-h proba-avortement
+  proba-piqure beta-hv
+  nu-h gamma-h delta-h
+  seuil-piqures-letal
   nouveaux-cas cumul-avortements cumul-morts
+  avortements-semaine naissances-semaine
+  morts-maladie-sem morts-ressources-sem morts-piqures-sem
 ]
 
 patches-own [
@@ -71,7 +75,7 @@ to setup
   set rho-emergence 15
   set mu-v 0.25
   set nu-v 1.5
-  set q-vertical 0.02
+  set q-vertical 0.005
   set facteur-eau-mediocre 3
   set duree-vie-moustique 9
   set pop-moustiques 0
@@ -79,16 +83,20 @@ to setup
 
   ; --- parametres couche hote ---
   set nb-ruminants 150
-  set proba-piqure 0.4
-  set beta-vh 0.3
-  set beta-hv 0.3
+  set proba-piqure 0.7
+  set beta-hv 0.6
   set nu-h 1.0
   set gamma-h 0.4
   set delta-h 0.08
-  set proba-avortement 0.4
+  set seuil-piqures-letal 400
   set nouveaux-cas 0
   set cumul-avortements 0
   set cumul-morts 0
+  set avortements-semaine 0
+  set naissances-semaine 0
+  set morts-maladie-sem 0
+  set morts-ressources-sem 0
+  set morts-piqures-sem 0
   ask ruminants [ die ]
   creer-ruminants
 
@@ -118,17 +126,15 @@ to go
   if semaine = 6  [ nettoyer-contre-saison ]
   appliquer-etat-paysage
 
-  ; couche vectorielle (EDO)
+  ; --- couche vectorielle (EDO) ---
   emergence-vecteurs
   integrer-edo-vecteurs
   deplacer-vecteurs
   mortalite-cohortes
 
-  ; couche hote
+  ; --- couche hote ---
   deplacer-ruminants
   amorcer-epidemie
-
-  ; transmission APRES les deplacements
   transmission-vecteur-hote
   evolution-ruminants
   renouvellement-cheptel
@@ -152,6 +158,7 @@ to calculer-intensite
   ifelse semaine >= 45 [ set intensite-cs min (list 1 ((semaine - 44) / 6)) ]
   [ set intensite-cs ifelse-value (semaine <= 6) [(6 - semaine) / 6] [0] ]
 end
+
 
 to appliquer-etat-paysage
   ask patches with [classe-base = "cultures"] [
@@ -252,10 +259,11 @@ to emergence-vecteurs
           set patch-gite myself
           set Sv min (list 300 (Lambda * 4))
           set Ev 0
-          set Iv 0                         ; naissent SAINES
+          set Iv 0
           set effectif Sv + Ev + Iv
           set age-semaines 0
           set gite-origine [type-gite] of myself
+          set infectee? false
           set shape "bug"
           set size 4
         ]
@@ -292,21 +300,6 @@ to-report taux-recrutement [W]
   report rho-emergence * W * facteur-saison
 end
 
-
-to amorcer-epidemie
-
-  if any? cohortes [
-
-    if (count ruminants with [etat-h = "I" or etat-h = "E"]) = 0 [
-      if any? ruminants with [etat-h = "S"] [
-        ask n-of (min (list 5 (count ruminants with [etat-h = "S"]))) ruminants with [etat-h = "S"] [
-          set etat-h "I"  set jours-etat 0
-        ]
-      ]
-    ]
-  ]
-end
-
 to-report surface-eau-locale
   if type-milieu != "eau" [ report 0 ]
   let base 1
@@ -317,14 +310,11 @@ end
 
 to deplacer-vecteurs
   ask cohortes [
-    ; les moustiques sont attires par les hotes (pour piquer)
     let hote-proche min-one-of ruminants in-radius 20 [distance myself]
     ifelse hote-proche != nobody [
-      ; se diriger vers l'hote le plus proche (comportement de recherche de repas sanguin)
       face hote-proche
       fd 4 + random 8
     ] [
-      ; pas d'hote en vue : vol de dispersion aleatoire
       rt random 360
       fd 8 + random 15
     ]
@@ -342,10 +332,13 @@ end
 
 to colorer-vecteurs
   ask cohortes [
-    ifelse Iv >= 5 [
-      set color red          ; nuee reellement infectee
+    ; une cohorte devient infectee des qu'une part notable porte le virus,
+    ; et le RESTE toute sa vie (les moustiques ne guerissent jamais)
+    if effectif > 0 and (Iv / effectif) > 0.05 [ set infectee? true ]
+    ifelse infectee? [
+      set color red          ; nuee infectieuse (persistante)
     ] [
-      set color magenta      ; saine
+      set color cyan         ; nuee saine
     ]
   ]
 end
@@ -355,6 +348,7 @@ to-report type-gite
   if est-grande-eau? [ report "grande-eau" ]
   report "mare-pluie"
 end
+
 
 to creer-ruminants
   let zones patches with [type-milieu = "prairie" or type-milieu = "arbustes"
@@ -366,24 +360,37 @@ to creer-ruminants
     set gestante? (random-float 1 < 0.4)
     set shape "cow"  set size 8  set color white
   ]
-
 end
 
 to deplacer-ruminants
   ask ruminants [
-    ; portee modulee par la saison : grande transhumance en saison seche
     let portee ifelse-value (intensite < 0.3) [12 + random 20] [4 + random 8]
-    let cible one-of patches in-radius portee with [
+
+    let destinations patches in-radius portee with [
       type-milieu = "prairie" or type-milieu = "arbustes"
       or (classe-base = "cultures" and type-milieu = "sol-nu")
-      or type-milieu = "eau"
     ]
-    if cible != nobody [
-      face cible
-      fd portee
-      if [type-milieu] of patch-here = "cultures" [
-        let refuge one-of neighbors with [type-milieu != "cultures"]
-        if refuge != nobody [ move-to refuge ]
+
+    let bords destinations with [any? neighbors with [type-milieu = "eau"]]
+
+    let cible nobody
+    ifelse any? bords and random-float 1 < 0.4 [
+      set cible one-of bords
+    ] [
+      if any? destinations [ set cible one-of destinations ]
+    ]
+
+    if cible != nobody [ move-to cible ]
+  ]
+end
+
+to amorcer-epidemie
+  if any? cohortes [
+    if (count ruminants with [etat-h = "I" or etat-h = "E"]) = 0 [
+      if any? ruminants with [etat-h = "S"] [
+        ask n-of (min (list 5 (count ruminants with [etat-h = "S"]))) ruminants with [etat-h = "S"] [
+          set etat-h "I"  set jours-etat 0
+        ]
       ]
     ]
   ]
@@ -392,53 +399,74 @@ end
 to transmission-vecteur-hote
   set nouveaux-cas 0
 
-  ask ruminants [
-    ; cohortes de moustiques a portee de piqure de CET hote
-    let coh cohortes in-radius 6
+  ; ===== (A) HOTE INFECTIEUX -> VECTEURS : parcours par COHORTE =====
+  ask cohortes [
+    let n-inf count ruminants in-radius 8 with [etat-h = "I"]
+    if n-inf > 0 [
+      let proba-infection beta-hv * (1 - exp (0 - n-inf / 3))
+      let nouveaux Sv * proba-infection * 0.35
+      if nouveaux > Sv [ set nouveaux Sv ]
+      set Sv max (list 0 (Sv - nouveaux))
+      set Ev Ev + nouveaux                 ; -> exposé (incubation), pas Iv direct
+      set effectif Sv + Ev + Iv
+    ]
+  ]
+
+  ; ===== (B) VECTEURS INFECTIEUX -> HOTE : parcours par RUMINANT sain =====
+  ask ruminants with [etat-h = "S"] [
+    let coh cohortes in-radius 8 with [Iv > 0]
     if any? coh [
-
-      ; (A) HOTE INFECTIEUX -> VECTEURS : l'hote contamine les nuees proches
-      if etat-h = "I" [
-        ask coh [
-          let nouveaux Sv * beta-hv * proba-piqure
-          if nouveaux > Sv [ set nouveaux Sv ]
-          set Sv max (list 0 (Sv - nouveaux))
-          set Iv Iv + nouveaux
-          set effectif Sv + Ev + Iv
-        ]
-      ]
-
-      ; (B) VECTEURS INFECTIEUX -> HOTE : les nuees infectees piquent l'hote sain
-      if etat-h = "S" [
-        let charge sum [Iv] of coh
-        if charge > 0 [
-          let lambda-h beta-vh * (1 - exp (0 - charge / 20))
-          if random-float 1 < lambda-h [
-            set etat-h "E"  set jours-etat 0
-            set nouveaux-cas nouveaux-cas + 1
-          ]
-        ]
+      let charge sum [Iv] of coh
+      let lambda-h beta-vh * (1 - exp (0 - charge / 15))
+      if random-float 1 < lambda-h [
+        set etat-h "E"  set jours-etat 0
+        set nouveaux-cas nouveaux-cas + 1
       ]
     ]
   ]
 end
 
 to evolution-ruminants
+  set avortements-semaine 0
+  set morts-maladie-sem 0
+  set morts-ressources-sem 0
+  set morts-piqures-sem 0
   ask ruminants [
     set jours-etat jours-etat + 1
-    if etat-h = "E" and jours-etat >= 1 [ set etat-h "I"  set jours-etat 0 ]
-    ; periode infectieuse longue (5 sem) : la source a le temps de transmettre
+    ; E -> I : au passage infectieux, TOUTE gestante avorte (signe FVR)
+    if etat-h = "E" and jours-etat >= 1 [
+      set etat-h "I"  set jours-etat 0
+      if gestante? [
+        set gestante? false
+        set cumul-avortements cumul-avortements + 1
+        set avortements-semaine avortements-semaine + 1
+      ]
+    ]
+    ; I -> R / mort par maladie apres periode infectieuse
     if etat-h = "I" and jours-etat >= 5 [
       ifelse random-float 1 < delta-h [
-        set cumul-morts cumul-morts + 1  die
+        set cumul-morts cumul-morts + 1
+        set morts-maladie-sem morts-maladie-sem + 1
+        die
       ] [
-        if gestante? and random-float 1 < proba-avortement [
-          set gestante? false  set cumul-avortements cumul-avortements + 1
-        ]
         set etat-h "R"  set jours-etat 0
       ]
     ]
   ]
+
+  ask ruminants with [etat-h = "I" or gestante?] [
+    let charge-piqures sum [effectif] of cohortes in-radius 3
+    if charge-piqures > seuil-piqures-letal [
+      let p-mort 0.1 * (charge-piqures / seuil-piqures-letal - 1)
+      if p-mort > 0.5 [ set p-mort 0.5 ]
+      if random-float 1 < p-mort [
+        set cumul-morts cumul-morts + 1
+        set morts-piqures-sem morts-piqures-sem + 1
+        die
+      ]
+    ]
+  ]
+  ; couleurs SEIR
   ask ruminants [
     if etat-h = "S" [ set color white ]
     if etat-h = "E" [ set color yellow ]
@@ -449,17 +477,40 @@ end
 
 
 to renouvellement-cheptel
-  let taux-renouvellement 0.02      ; 2% du cheptel renouvele par semaine
+  set naissances-semaine 0
+
+  let facteur-saison ifelse-value (semaine >= 35 and semaine <= 46) [6] [1]
+  let taux-naissance (taux-renouvellement-base * facteur-saison)
+  let meres ruminants with [etat-h != "I" and etat-h != "E"]
+  ask meres [
+    if random-float 1 < taux-naissance [
+      hatch-ruminants 1 [
+        set etat-h "S"  set jours-etat 0
+        set gestante? false
+        set shape "cow"  set size 8  set color white
+        rt random 360  fd 1
+      ]
+      set naissances-semaine naissances-semaine + 1
+    ]
+  ]
+
+  if semaine >= 30 and semaine <= 44 [
+    ask ruminants with [not gestante? and (etat-h = "S" or etat-h = "R")] [
+      if random-float 1 < 0.15 [ set gestante? true ]
+    ]
+  ]
+
+  ; mortalite naturelle saisonniere (rarete des ressources en saison seche)
+  let mortalite-ressources (0.005 + 0.06 * (1 - intensite))
   ask ruminants [
-    if random-float 1 < taux-renouvellement [
-      ; l'animal est "remplace" : il redevient un jeune sensible
-      set etat-h "S"
-      set jours-etat 0
-      set gestante? (random-float 1 < 0.4)
-      set color white
+    if random-float 1 < mortalite-ressources [
+      set cumul-morts cumul-morts + 1
+      set morts-ressources-sem morts-ressources-sem + 1
+      die
     ]
   ]
 end
+
 
 to-report classe-nom [code]
   report item code ["eau" "arbres" "prairie" "veg-inondee" "cultures"
@@ -488,7 +539,6 @@ to-report pct [t]
   report precision (100 * count patches with [type-milieu = t] / count patches) 1
 end
 
-
 to-report total-moustiques report pop-moustiques end
 to-report nb-gites-eau report count patches with [type-milieu = "eau"] end
 to-report moustiques-eau-mediocre report sum [effectif] of cohortes with [gite-origine = "eau-mediocre"] end
@@ -505,6 +555,13 @@ to-report nb-E report count ruminants with [etat-h = "E"] end
 to-report nb-I report count ruminants with [etat-h = "I"] end
 to-report nb-R report count ruminants with [etat-h = "R"] end
 to-report cas-hebdo report nouveaux-cas end
+to-report avortements-hebdo report avortements-semaine end
+to-report naissances-hebdo report naissances-semaine end
+to-report morts-maladie-hebdo report morts-maladie-sem end
+to-report morts-ressources-hebdo report morts-ressources-sem end
+to-report morts-piqures-hebdo report morts-piqures-sem end
+to-report morts-hebdo report morts-maladie-sem + morts-ressources-sem + morts-piqures-sem end
+to-report population-cheptel report count ruminants end
 @#$#@#$#@
 GRAPHICS-WINDOW
 91
@@ -568,29 +625,10 @@ NIL
 1
 
 PLOT
-1033
-10
-1416
-210
-Population et gites
-semaines
-effectif
-0.0
-10.0
-0.0
-10.0
-true
-true
-"" ""
-PENS
-"total-moustiques" 1.0 0 -2674135 true "" "plot total-moustiques"
-"gites-eau" 1.0 0 -13840069 true "" "plot nb-gites-eau"
-
-PLOT
 1030
-213
-1403
-470
+10
+1361
+130
 Moustiques par gîte
 effectif
 gite-origine
@@ -607,10 +645,10 @@ PENS
 "moustiques-grande-eau" 1.0 0 -14730904 true "" "plot moustiques-grande-eau"
 
 PLOT
-1033
-475
-1431
-711
+1029
+329
+1427
+554
 Etats Ruminant
 semaines
 nombre de ruminants
@@ -625,6 +663,75 @@ PENS
 "Sains" 1.0 0 -13791810 true "" "plot nb-S"
 "Infectés" 1.0 0 -2674135 true "" "plot nb-I"
 "Rétablie" 1.0 0 -14439633 true "" "plot nb-R"
+
+SLIDER
+581
+615
+886
+648
+taux-renouvellement-base
+taux-renouvellement-base
+0
+0.1
+0.05
+0.01
+1
+NIL
+HORIZONTAL
+
+PLOT
+1026
+555
+1438
+806
+plot 1
+semaines
+nombre de morts
+0.0
+10.0
+0.0
+10.0
+true
+false
+"" ""
+PENS
+"default" 1.0 0 -5298144 true "" "plot morts-maladie-hebdo"
+" Mort Ressource" 1.0 0 -7171555 true "" "plot morts-ressources-hebdo"
+"Mort piqure" 1.0 0 -6917194 true "" "plot morts-piqures-hebdo"
+
+SLIDER
+581
+663
+887
+696
+beta-vh
+beta-vh
+0
+100
+26.0
+1
+1
+NIL
+HORIZONTAL
+
+PLOT
+1028
+144
+1421
+326
+Naissance et mort 
+semaines
+nombre d'individus
+0.0
+10.0
+0.0
+10.0
+true
+false
+"" ""
+PENS
+"default" 1.0 0 -2674135 true "" "plot avortements-hebdo"
+"pen-1" 1.0 0 -13840069 true "" "plot naissances-hebdo"
 
 @#$#@#$#@
 ## WHAT IS IT?
