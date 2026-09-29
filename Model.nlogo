@@ -15,25 +15,29 @@ ruminants-own [
   etat-h             ; "S" "E" "I" "R"
   jours-etat
   gestante?
+  etat-mobilite      ; "repos" | "paturage" | "deplacement"
+  base-x base-y      ; centre du domaine vital (home range)
 ]
 
 globals [
   occupation-sol
   semaine annee saison
   intensite intensite-cs
-  part-contre-saison
   ; --- EDO vecteurs ---
   rho-emergence mu-v nu-v q-vertical
   facteur-eau-mediocre duree-vie-moustique
   pop-moustiques
   ; --- couche hote ---
   nb-ruminants
-  proba-piqure beta-hv
+  proba-piqure
   nu-h gamma-h delta-h
   seuil-piqures-letal
   nouveaux-cas cumul-avortements cumul-morts
   avortements-semaine naissances-semaine
   morts-maladie-sem morts-ressources-sem morts-piqures-sem
+  ; --- parametres de mobilite (issus de l'analyse HMM, methode B) ---
+  depl-repos depl-paturage-min depl-paturage-max
+  rayon-domaine
 ]
 
 patches-own [
@@ -41,7 +45,9 @@ patches-own [
   contre-saison? canal? seuil est-grande-eau? coeur-eau?
 ]
 
-
+; ============================================================================
+;  SETUP
+; ============================================================================
 to setup
   clear-all
   set occupation-sol gis:load-dataset "Delta_fleuve_senegal_100m_small.asc"
@@ -66,8 +72,12 @@ to setup
   ]
 
   calculer-seuils-eaux
-  set semaine 1  set annee 1  set part-contre-saison 0.15
+  set semaine 1  set annee 1
   set intensite 0  set intensite-cs 0
+
+  ; --- scenario d'annee (pre-regle les sliders environnementaux) ---
+  appliquer-type-annee
+
   appliquer-etat-paysage
   colorer
 
@@ -84,7 +94,6 @@ to setup
   ; --- parametres couche hote ---
   set nb-ruminants 150
   set proba-piqure 0.7
-  set beta-hv 0.6
   set nu-h 1.0
   set gamma-h 0.4
   set delta-h 0.08
@@ -97,10 +106,38 @@ to setup
   set morts-maladie-sem 0
   set morts-ressources-sem 0
   set morts-piqures-sem 0
+
+  ; --- parametres de mobilite (patches, issus de l'analyse HMM) ---
+  set depl-repos 7
+  set depl-paturage-min 10
+  set depl-paturage-max 25
+  set rayon-domaine 30
+
   ask ruminants [ die ]
   creer-ruminants
 
   reset-ticks
+end
+
+; --- applique un scenario d'annee predefini (via le chooser type-annee) ---
+to appliquer-type-annee
+  if type-annee = "seche" [
+    set intensite-pluies 0.6   set duree-pluies -4
+    set persistance-eau 0.7    set vigueur-vegetation 0.7
+    set ampleur-contre-saison 0.10
+  ]
+  if type-annee = "normale" [
+    set intensite-pluies 1.0   set duree-pluies 0
+    set persistance-eau 1.0    set vigueur-vegetation 1.0
+    set ampleur-contre-saison 0.15
+  ]
+  if type-annee = "humide" [
+    ; annee a risque FVR : pluies fortes, tardives, eau persistante
+    set intensite-pluies 1.4   set duree-pluies 4
+    set persistance-eau 2.0    set vigueur-vegetation 1.3
+    set ampleur-contre-saison 0.25
+  ]
+  ; si "personnalise", on ne touche pas aux sliders (regles a la main)
 end
 
 to calculer-seuils-eaux
@@ -117,10 +154,16 @@ to calculer-seuils-eaux
   ask patches with [classe-base = "eau" and not est-grande-eau?] [ set seuil 1 - (seuil / maxe) ]
 end
 
-
+; ============================================================================
+;  GO
+; ============================================================================
 to go
   set semaine semaine + 1
-  if semaine > 52 [ set semaine 1  set annee annee + 1 ]
+  if semaine > 52 [
+    set semaine 1  set annee annee + 1
+    ; a chaque nouvelle annee, on peut re-appliquer un scenario aleatoire
+    if annees-variables? [ appliquer-type-annee ]
+  ]
   calculer-intensite
   if semaine = 45 [ lancer-contre-saison ]
   if semaine = 6  [ nettoyer-contre-saison ]
@@ -133,7 +176,7 @@ to go
   mortalite-cohortes
 
   ; --- couche hote ---
-  deplacer-ruminants
+  module-mobilite
   amorcer-epidemie
   transmission-vecteur-hote
   evolution-ruminants
@@ -145,21 +188,42 @@ to go
   tick
 end
 
+; ============================================================================
+;  CALENDRIER / INTENSITE (module par les scenarios d'annee)
+; ============================================================================
 to calculer-intensite
-  ifelse semaine <= 8 [
+  ; le decalage duree-pluies etire/decale la fenetre humide
+  let deb-pluies (8 - round (duree-pluies / 2))
+  let fin-pic    (30 + round (duree-pluies / 2))
+  let fin-pluies (44 + round (duree-pluies / 2))
+
+  ifelse semaine <= deb-pluies [
     set saison "saison seche"                 set intensite 0
-  ] [ ifelse semaine <= 30 [
-    set saison "pluies (montee)"              set intensite (semaine - 8) / 22
-  ] [ ifelse semaine <= 44 [
-    set saison "regression (fin des pluies)"  set intensite (44 - semaine) / 14
+  ] [ ifelse semaine <= fin-pic [
+    set saison "pluies (montee)"              set intensite (semaine - deb-pluies) / (fin-pic - deb-pluies)
+  ] [ ifelse semaine <= fin-pluies [
+    set saison "regression (fin des pluies)"  set intensite (fin-pluies - semaine) / (fin-pluies - fin-pic)
   ] [
     set saison "seche / contre-saison"        set intensite 0
   ] ] ]
+
+  ; --- modulation par l'intensite des pluies (annee humide vs seche) ---
+  set intensite intensite * intensite-pluies
+  ; --- variabilite aleatoire inter-annuelle (facultative) ---
+  if annees-variables? [
+    set intensite intensite * (0.9 + random-float 0.2)
+  ]
+  if intensite > 1 [ set intensite 1 ]
+  if intensite < 0 [ set intensite 0 ]
+
+  ; --- contre-saison ---
   ifelse semaine >= 45 [ set intensite-cs min (list 1 ((semaine - 44) / 6)) ]
   [ set intensite-cs ifelse-value (semaine <= 6) [(6 - semaine) / 6] [0] ]
 end
 
-
+; ============================================================================
+;  ENVIRONNEMENT
+; ============================================================================
 to appliquer-etat-paysage
   ask patches with [classe-base = "cultures"] [
     let niv ifelse-value contre-saison? [intensite-cs] [intensite]
@@ -171,7 +235,9 @@ to appliquer-etat-paysage
   ask patches with [classe-base = "eau" and est-grande-eau?] [
     set type-milieu "eau"  set qualite-eau "bonne"
   ]
-  repeat round ((1 - intensite) * 2) [
+  ; retrait des berges module par la persistance de l'eau
+  ; persistance elevee -> moins d'anneaux retires -> eau qui dure
+  repeat round ((1 - intensite) * 2 / persistance-eau) [
     ask patches with [type-milieu = "eau" and est-grande-eau? and not coeur-eau?] [
       if any? neighbors with [type-milieu != "eau"] [
         set type-milieu "prairie"  set qualite-eau "na"
@@ -190,7 +256,7 @@ end
 
 to lancer-contre-saison
   let candidates patches with [classe-base = "cultures" and type-milieu = "sol-nu"]
-  let n-foyers min (list (count candidates) round (part-contre-saison * 720))
+  let n-foyers min (list (count candidates) round (ampleur-contre-saison * 720))
   if n-foyers > 0 [
     ask n-of n-foyers candidates [ if not contre-saison? [ etendre-parcelle ] ]
   ]
@@ -243,7 +309,9 @@ to nettoyer-contre-saison
   ]
 end
 
-
+; ============================================================================
+;  COUCHE VECTORIELLE (EDO)
+; ============================================================================
 to emergence-vecteurs
   let facteur-saison (0.3 + intensite)
   if facteur-saison < 0.35 [ stop ]
@@ -332,13 +400,11 @@ end
 
 to colorer-vecteurs
   ask cohortes [
-    ; une cohorte devient infectee des qu'une part notable porte le virus,
-    ; et le RESTE toute sa vie (les moustiques ne guerissent jamais)
     if effectif > 0 and (Iv / effectif) > 0.05 [ set infectee? true ]
     ifelse infectee? [
-      set color red          ; nuee infectieuse (persistante)
+      set color red
     ] [
-      set color cyan         ; nuee saine
+      set color cyan
     ]
   ]
 end
@@ -349,7 +415,9 @@ to-report type-gite
   report "mare-pluie"
 end
 
-
+; ============================================================================
+;  COUCHE HOTE : creation des ruminants
+; ============================================================================
 to creer-ruminants
   let zones patches with [type-milieu = "prairie" or type-milieu = "arbustes"
                           or type-milieu = "sol-nu"]
@@ -358,32 +426,105 @@ to creer-ruminants
     move-to one-of zones
     set etat-h "S"  set jours-etat 0
     set gestante? (random-float 1 < 0.4)
+    set etat-mobilite "repos"
+    set base-x xcor  set base-y ycor
     set shape "cow"  set size 8  set color white
   ]
 end
 
-to deplacer-ruminants
+; ============================================================================
+;  MODULE MOBILITE — modele de Markov a 3 etats (Scriban et al. 2024)
+; ============================================================================
+to module-mobilite
   ask ruminants [
-    let portee ifelse-value (intensite < 0.3) [12 + random 20] [4 + random 8]
+    ; 1) TRANSITION D'ETAT (Markov)
+    set etat-mobilite transition-etat etat-mobilite
 
-    let destinations patches in-radius portee with [
-      type-milieu = "prairie" or type-milieu = "arbustes"
-      or (classe-base = "cultures" and type-milieu = "sol-nu")
+    ; 2) DEPLACEMENT selon l'etat comportemental
+    if etat-mobilite = "repos" [
+      if random-float 1 < 0.3 [
+        deplacer-vers-cible (one-of patches in-radius depl-repos with [milieu-accessible?])
+      ]
+    ]
+    if etat-mobilite = "paturage" [
+      let d (depl-paturage-min + random (depl-paturage-max - depl-paturage-min))
+      let cible one-of patches in-radius d with [
+        milieu-accessible? and any? neighbors with [milieu-nourrissant?]
+      ]
+      if cible = nobody [ set cible one-of patches in-radius d with [milieu-accessible?] ]
+      deplacer-vers-cible cible
+    ]
+    if etat-mobilite = "deplacement" [
+      let d distance-nette-saison
+      let cible one-of patches in-radius d with [milieu-accessible?]
+      deplacer-vers-cible cible
     ]
 
-    let bords destinations with [any? neighbors with [type-milieu = "eau"]]
-
-    let cible nobody
-    ifelse any? bords and random-float 1 < 0.4 [
-      set cible one-of bords
-    ] [
-      if any? destinations [ set cible one-of destinations ]
+    ; 3) DOMAINE VITAL : rappel vers la base si trop eloigne
+    if (distancexy base-x base-y) > rayon-domaine [
+      let cap towardsxy base-x base-y
+      let retour patch-at-heading-and-distance cap (rayon-domaine * 0.5)
+      if retour != nobody and [milieu-accessible?] of retour [ move-to retour ]
     ]
-
-    if cible != nobody [ move-to cible ]
   ]
 end
 
+; --- TRANSITION DE MARKOV : nouvel etat selon etat courant, saison, ressources ---
+to-report transition-etat [ etat-courant ]
+  let p-repos    ifelse-value (intensite > 0.3) [0.41] [0.43]
+  let p-paturage ifelse-value (intensite > 0.3) [0.41] [0.34]
+
+  ; FACTEUR RESSOURCES : en zone pauvre, l'animal se deplace plus
+  let voisinage patches in-radius 5
+  let dispo (count voisinage with [milieu-nourrissant?]) / (count voisinage)
+  if dispo < 0.3 [
+    set p-repos    p-repos * 0.7
+    set p-paturage p-paturage * 0.7
+  ]
+
+  let persistance 0.5
+  ifelse random-float 1 < persistance [
+    report etat-courant
+  ] [
+    let r random-float 1
+    ifelse r < p-repos [ report "repos" ]
+    [ ifelse r < (p-repos + p-paturage) [ report "paturage" ] [ report "deplacement" ] ]
+  ]
+end
+
+; --- distance nette hebdomadaire tiree dans la distribution saisonniere ---
+to-report distance-nette-saison
+  let moy 15  let ec 4
+  ifelse intensite > 0.3 [
+    set moy 11  set ec 5
+  ] [
+    ifelse (semaine >= 1 and semaine <= 8) [
+      set moy 18  set ec 3
+    ] [
+      set moy 15  set ec 4
+    ]
+  ]
+  let d round (moy + ec * (random-normal 0 1))
+  report max (list 2 (min (list 30 d)))
+end
+
+to deplacer-vers-cible [ cible ]
+  if cible != nobody [ move-to cible ]
+end
+
+to-report milieu-accessible?
+  report type-milieu != "eau" and type-milieu != "cultures" and type-milieu != "hors-zone"
+end
+
+to-report milieu-nourrissant?
+  report type-milieu = "prairie" or type-milieu = "veg-inondee"
+      or type-milieu = "arbustes"
+      or (classe-base = "cultures" and type-milieu = "sol-nu")
+end
+
+; ============================================================================
+;  EPIDEMIOLOGIE
+; ============================================================================
 to amorcer-epidemie
   if any? cohortes [
     if (count ruminants with [etat-h = "I" or etat-h = "E"]) = 0 [
@@ -399,7 +540,7 @@ end
 to transmission-vecteur-hote
   set nouveaux-cas 0
 
-  ; ===== (A) HOTE INFECTIEUX -> VECTEURS : parcours par COHORTE =====
+  ; ===== (A) HOTE INFECTIEUX -> VECTEURS =====
   ask cohortes [
     let n-inf count ruminants in-radius 8 with [etat-h = "I"]
     if n-inf > 0 [
@@ -407,12 +548,12 @@ to transmission-vecteur-hote
       let nouveaux Sv * proba-infection * 0.35
       if nouveaux > Sv [ set nouveaux Sv ]
       set Sv max (list 0 (Sv - nouveaux))
-      set Ev Ev + nouveaux                 ; -> exposé (incubation), pas Iv direct
+      set Ev Ev + nouveaux
       set effectif Sv + Ev + Iv
     ]
   ]
 
-  ; ===== (B) VECTEURS INFECTIEUX -> HOTE : parcours par RUMINANT sain =====
+  ; ===== (B) VECTEURS INFECTIEUX -> HOTE =====
   ask ruminants with [etat-h = "S"] [
     let coh cohortes in-radius 8 with [Iv > 0]
     if any? coh [
@@ -475,18 +616,32 @@ to evolution-ruminants
   ]
 end
 
-
 to renouvellement-cheptel
   set naissances-semaine 0
 
+  ; --- pic saisonnier de naissances (fin de saison des pluies) ---
   let facteur-saison ifelse-value (semaine >= 35 and semaine <= 46) [6] [1]
-  let taux-naissance (taux-renouvellement-base * facteur-saison)
+
+  ; --- NAISSANCES : chaque mere non infectee peut mettre bas si BIEN NOURRIE ---
   let meres ruminants with [etat-h != "I" and etat-h != "E"]
   ask meres [
+    let voisinage patches in-radius 4
+    let nourrissants voisinage with [
+      type-milieu = "prairie" or type-milieu = "veg-inondee"
+      or type-milieu = "cultures" or type-milieu = "arbustes"
+    ]
+    ; la vigueur de la vegetation module la nourriture disponible
+    let dispo-nourriture ((count nourrissants) / (count voisinage)) * vigueur-vegetation
+    if dispo-nourriture > 1 [ set dispo-nourriture 1 ]
+
+    let taux-naissance (taux-renouvellement-base * facteur-saison * dispo-nourriture)
+
     if random-float 1 < taux-naissance [
       hatch-ruminants 1 [
         set etat-h "S"  set jours-etat 0
         set gestante? false
+        set etat-mobilite "repos"
+        set base-x xcor  set base-y ycor
         set shape "cow"  set size 8  set color white
         rt random 360  fd 1
       ]
@@ -494,13 +649,14 @@ to renouvellement-cheptel
     ]
   ]
 
+  ; --- GESTATION saisonniere ---
   if semaine >= 30 and semaine <= 44 [
     ask ruminants with [not gestante? and (etat-h = "S" or etat-h = "R")] [
       if random-float 1 < 0.15 [ set gestante? true ]
     ]
   ]
 
-  ; mortalite naturelle saisonniere (rarete des ressources en saison seche)
+  ; --- MORTALITE naturelle saisonniere (rarete des ressources) ---
   let mortalite-ressources (0.005 + 0.06 * (1 - intensite))
   ask ruminants [
     if random-float 1 < mortalite-ressources [
@@ -511,7 +667,9 @@ to renouvellement-cheptel
   ]
 end
 
-
+; ============================================================================
+;  CLASSES / COULEURS
+; ============================================================================
 to-report classe-nom [code]
   report item code ["eau" "arbres" "prairie" "veg-inondee" "cultures"
                     "arbustes" "bati" "sol-nu"]
@@ -539,6 +697,9 @@ to-report pct [t]
   report precision (100 * count patches with [type-milieu = t] / count patches) 1
 end
 
+; ============================================================================
+;  RAPPORTEURS
+; ============================================================================
 to-report total-moustiques report pop-moustiques end
 to-report nb-gites-eau report count patches with [type-milieu = "eau"] end
 to-report moustiques-eau-mediocre report sum [effectif] of cohortes with [gite-origine = "eau-mediocre"] end
@@ -562,6 +723,17 @@ to-report morts-ressources-hebdo report morts-ressources-sem end
 to-report morts-piqures-hebdo report morts-piqures-sem end
 to-report morts-hebdo report morts-maladie-sem + morts-ressources-sem + morts-piqures-sem end
 to-report population-cheptel report count ruminants end
+; --- disponibilite globale des ressources (pour le plot) ---
+to-report ressources-disponibles
+  report count patches with [
+    type-milieu = "prairie" or type-milieu = "veg-inondee"
+    or type-milieu = "arbustes"
+    or (classe-base = "cultures" and type-milieu = "sol-nu")
+  ]
+end
+to-report pct-ressources
+  report precision (100 * ressources-disponibles / count patches) 1
+end
 @#$#@#$#@
 GRAPHICS-WINDOW
 91
@@ -665,15 +837,15 @@ PENS
 "Rétablie" 1.0 0 -14439633 true "" "plot nb-R"
 
 SLIDER
-581
-615
-886
-648
+0
+580
+283
+613
 taux-renouvellement-base
 taux-renouvellement-base
 0
 0.1
-0.05
+0.08
 0.01
 1
 NIL
@@ -700,10 +872,10 @@ PENS
 "Mort piqure" 1.0 0 -6917194 true "" "plot morts-piqures-hebdo"
 
 SLIDER
-581
-663
-887
-696
+329
+578
+610
+611
 beta-vh
 beta-vh
 0
@@ -732,6 +904,135 @@ false
 PENS
 "default" 1.0 0 -2674135 true "" "plot avortements-hebdo"
 "pen-1" 1.0 0 -13840069 true "" "plot naissances-hebdo"
+
+SLIDER
+420
+634
+608
+667
+beta-hv
+beta-hv
+0
+26
+26.0
+1
+1
+NIL
+HORIZONTAL
+
+PLOT
+626
+587
+1018
+801
+Disponibilite des ressources
+semaines
+nb de patches
+0.0
+10.0
+0.0
+10.0
+true
+false
+"" ""
+PENS
+"default" 1.0 0 -16777216 true "" "plot count turtles"
+
+CHOOSER
+223
+749
+361
+794
+type-annee
+type-annee
+"seche" "humide" "normale"
+0
+
+SLIDER
+0
+694
+194
+727
+intensite-pluies
+intensite-pluies
+0.4
+1.6
+0.6
+0.1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+420
+697
+610
+730
+duree-pluies
+duree-pluies
+-6
+6
+-4.0
+1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+222
+695
+394
+728
+persistance-eau
+persistance-eau
+0.5
+2.5
+0.7
+0.1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+220
+634
+392
+667
+vigueur-vegetation
+vigueur-vegetation
+0.5
+1.5
+0.7
+0.1
+1
+NIL
+HORIZONTAL
+
+SLIDER
+0
+634
+195
+667
+ampleur-contre-saison
+ampleur-contre-saison
+0
+0.4
+0.1
+0.05
+1
+NIL
+HORIZONTAL
+
+SWITCH
+13
+748
+170
+781
+annees-variables?
+annees-variables?
+0
+1
+-1000
 
 @#$#@#$#@
 ## WHAT IS IT?
