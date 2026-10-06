@@ -1,6 +1,11 @@
 extensions [ gis ]
 breed [ cohortes cohorte ]
 breed [ ruminants ruminant ]
+breed [ veterinaires veterinaire ]
+
+veterinaires-own [
+  cas-vus-semaine        ; cas detectes par ce veto cette semaine
+]
 
 cohortes-own [
   Sv Ev Iv           ; compartiments EDO du vecteur
@@ -38,6 +43,11 @@ globals [
   ; --- parametres de mobilite (issus de l'analyse HMM, methode B) ---
   depl-repos depl-paturage-min depl-paturage-max
   rayon-domaine
+    ; --- surveillance veterinaire ---
+  nb-veterinaires        ; nombre de veterinaires (slider possible)
+  rayon-vision-veto      ; rayon de detection des cas
+  cas-reportes-semaine   ; total des cas vus par les vetos cette semaine
+  cas-reels-semaine      ; total des cas reels cette semaine (I + nouveaux)
 ]
 
 patches-own [
@@ -116,6 +126,14 @@ to setup
   ask ruminants [ die ]
   creer-ruminants
 
+    ; --- surveillance ---
+  set nb-veterinaires 5
+  set rayon-vision-veto 6
+  set cas-reportes-semaine 0
+  set cas-reels-semaine 0
+  creer-veterinaires
+  initialiser-fichiers-csv
+
   reset-ticks
 end
 
@@ -182,9 +200,12 @@ to go
   evolution-ruminants
   renouvellement-cheptel
   colorer-vecteurs
+  surveillance-veterinaire
 
   set pop-moustiques sum [effectif] of cohortes
   colorer
+
+
   tick
 end
 
@@ -469,6 +490,86 @@ to module-mobilite
   ]
 end
 
+
+to creer-veterinaires
+  let zones patches with [milieu-accessible?]
+  if not any? zones [ stop ]
+  create-veterinaires nb-veterinaires [
+    move-to one-of zones
+    set shape "person"
+    set size 10
+    set color blue
+    set cas-vus-semaine 0
+  ]
+end
+
+
+;  SURVEILLANCE : les veterinaires patrouillent et reportent les cas vus
+
+to surveillance-veterinaire
+  ; deplacement : chaque veto se dirige vers une zone avec du betail
+  ask veterinaires [
+    let cible-betail min-one-of ruminants in-radius 80 [distance myself]
+    ifelse cible-betail != nobody [
+      face cible-betail
+      fd 8 + random 12         ; se dirige vers un troupeau (plus loin)
+    ] [
+      rt random 360
+      fd 12 + random 15        ; patrouille large si aucun betail en vue
+    ]
+    ; rester sur un milieu accessible
+    if not milieu-accessible? [
+      let refuge one-of neighbors with [milieu-accessible?]
+      if refuge != nobody [ move-to refuge ]
+    ]
+    ; detection : cas infectieux dans le rayon de vision
+    set cas-vus-semaine count ruminants in-radius rayon-vision-veto with [etat-h = "I"]
+  ]
+
+  ; total des cas reportes cette semaine (sans double comptage approximatif)
+  ; on compte les ruminants I vus par AU MOINS un veterinaire
+  set cas-reportes-semaine count ruminants with [
+    etat-h = "I" and any? veterinaires in-radius rayon-vision-veto
+  ]
+
+  ; total des cas reels cette semaine (tous les infectieux presents)
+  set cas-reels-semaine count ruminants with [etat-h = "I"]
+
+  ; ecriture dans les fichiers CSV
+  ecrire-csv
+end
+
+
+
+; --- initialisation : cree les fichiers avec leurs en-tetes ---
+to initialiser-fichiers-csv
+  ; fichier des cas reportes par les veterinaires
+  if file-exists? "cas_reportes.csv" [ file-delete "cas_reportes.csv" ]
+  file-open "cas_reportes.csv"
+  file-print "annee,semaine,cas_reportes"
+  file-close
+
+  ; fichier des cas reels totaux
+  if file-exists? "cas_reels.csv" [ file-delete "cas_reels.csv" ]
+  file-open "cas_reels.csv"
+  file-print "annee,semaine,cas_reels"
+  file-close
+end
+
+; --- ecriture d'une ligne par semaine dans chaque fichier ---
+to ecrire-csv
+  file-open "cas_reportes.csv"
+  file-print (word annee "," semaine "," cas-reportes-semaine)
+  file-close
+
+  file-open "cas_reels.csv"
+  file-print (word annee "," semaine "," cas-reels-semaine)
+  file-close
+end
+
+
+
+
 ; --- TRANSITION DE MARKOV : nouvel etat selon etat courant, saison, ressources ---
 to-report transition-etat [ etat-courant ]
   let p-repos    ifelse-value (intensite > 0.3) [0.41] [0.43]
@@ -733,6 +834,13 @@ to-report ressources-disponibles
 end
 to-report pct-ressources
   report precision (100 * ressources-disponibles / count patches) 1
+end
+
+to-report cas-reportes report cas-reportes-semaine end
+to-report cas-reels report cas-reels-semaine end
+to-report taux-detection
+  if cas-reels-semaine = 0 [ report 0 ]
+  report precision (100 * cas-reportes-semaine / cas-reels-semaine) 1
 end
 @#$#@#$#@
 GRAPHICS-WINDOW
